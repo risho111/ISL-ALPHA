@@ -1,0 +1,31 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# IDE
+.idea/
+*.iml
+
+# Environment
+.env
+*.env
+
+# Large data/video files
+data/raw/
+data/videos/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# System
+.DS_Store
+Thumbs.db
