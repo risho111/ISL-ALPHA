@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+*.iml
+
+# Environment
+.env
+*.env
+
+# Dataset and generated training files
+ISL-App-Clean/data/raw/
+ISL-App-Clean/data/processed/*.npy
+ISL-App-Clean/data/processed/*.npz
+
+# Videos
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# System
+.DS_Store
+Thumbs.db
