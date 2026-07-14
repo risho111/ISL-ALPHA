@@ -37,7 +37,7 @@ class BackendPrediction {
 }
 
 class BackendService {
-  static const String baseUrl = 'http://10.174.238.219:8000';
+  static const String baseUrl = 'http://10.139.23.219:8000';
 
   Future<BackendPrediction> predict(String base64Image) async {
     final url = Uri.parse('$baseUrl/predict');

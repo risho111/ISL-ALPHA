@@ -2,6 +2,8 @@ import json
 import cv2
 import numpy as np
 import mediapipe as mp
+import time
+from pathlib import Path
 
 from config import (
     RAW_DATA_DIR,
@@ -17,176 +19,148 @@ from config import (
     MIN_TRACKING_CONFIDENCE,
 )
 
-
 mp_hands = mp.solutions.hands
 
 ROTATE_VIDEOS = True
 ROTATE_CODE = cv2.ROTATE_90_CLOCKWISE
 
+# Cache directory — stores per-video .npy so re-runs skip already-processed videos
+CACHE_DIR = PROCESSED_DATA_DIR / "cache"
+
+
+def cache_path_for(video_path: Path) -> Path:
+    size = video_path.stat().st_size
+    label = video_path.parent.name
+    key = f"{label}__{video_path.stem}__{size}"
+    return CACHE_DIR / f"{key}.npy"
+
 
 def normalize_hand(landmarks):
     wrist = landmarks[0]
     points = []
-
     for lm in landmarks:
-        x = lm.x - wrist.x
-        y = lm.y - wrist.y
-        z = lm.z - wrist.z
-        points.append([x, y, z])
-
+        points.append([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
     points = np.array(points, dtype=np.float32)
-
     scale = np.max(np.linalg.norm(points, axis=1))
     if scale < 1e-6:
         scale = 1.0
-
     points = points / scale
-
     hand_shape = points.flatten()
-
-    wrist_position = np.array(
-        [wrist.x, wrist.y, wrist.z],
-        dtype=np.float32
-    )
-
+    wrist_position = np.array([wrist.x, wrist.y, wrist.z], dtype=np.float32)
     return np.concatenate([hand_shape, wrist_position])
 
 
 def extract_base_keypoints_from_frame(frame, hands_detector):
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = hands_detector.process(frame_rgb)
-
     all_hands = []
-
     if result.multi_hand_landmarks:
         detected_hands = sorted(
             result.multi_hand_landmarks,
             key=lambda hand: hand.landmark[0].x
         )
-
         for hand_landmarks in detected_hands[:2]:
-            hand_features = normalize_hand(hand_landmarks.landmark)
-            all_hands.append(hand_features)
-
+            all_hands.append(normalize_hand(hand_landmarks.landmark))
     while len(all_hands) < 2:
         all_hands.append(np.zeros(HAND_FEATURE_SIZE, dtype=np.float32))
-
-    base_features = np.concatenate(all_hands)
-
-    if base_features.shape[0] != BASE_FEATURE_SIZE:
-        raise ValueError(
-            f"Base feature mismatch: got {base_features.shape[0]}, expected {BASE_FEATURE_SIZE}"
-        )
-
-    return base_features
+    return np.concatenate(all_hands)
 
 
 def add_motion_features(base_sequence):
-    """
-    base_sequence shape: (30, 132)
-
-    motion = current frame - previous frame
-
-    final sequence shape:
-    base features 132 + motion features 132 = 264
-    """
-
     motion_sequence = np.zeros_like(base_sequence, dtype=np.float32)
-
     motion_sequence[1:] = base_sequence[1:] - base_sequence[:-1]
-
-    final_sequence = np.concatenate(
-        [base_sequence, motion_sequence],
-        axis=1
-    )
-
-    return final_sequence.astype(np.float32)
+    return np.concatenate([base_sequence, motion_sequence], axis=1).astype(np.float32)
 
 
 def process_video(video_path, hands_detector):
-    cap = cv2.VideoCapture(str(video_path))
+    # Cache hit
+    cp = cache_path_for(video_path)
+    if cp.exists():
+        try:
+            sequence = np.load(str(cp))
+            if sequence.shape == (SEQUENCE_LENGTH, FEATURE_SIZE):
+                return sequence, True
+        except Exception:
+            pass
 
+    # Extract from video
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"Could not open video: {video_path}")
-        return None
+        return None, False
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
     if total_frames <= 0:
-        print(f"No frames found in video: {video_path}")
         cap.release()
-        return None
+        return None, False
 
-    frame_indices = np.linspace(
-        0,
-        total_frames - 1,
-        SEQUENCE_LENGTH
-    ).astype(int)
-
+    frame_indices = np.linspace(0, total_frames - 1, SEQUENCE_LENGTH).astype(int)
     base_frame_features = []
 
     for frame_index in frame_indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
-
         success, frame = cap.read()
-
         if not success:
-            base_frame_features.append(
-                np.zeros(BASE_FEATURE_SIZE, dtype=np.float32)
-            )
+            base_frame_features.append(np.zeros(BASE_FEATURE_SIZE, dtype=np.float32))
             continue
-
         if ROTATE_VIDEOS:
             frame = cv2.rotate(frame, ROTATE_CODE)
-
-        base_features = extract_base_keypoints_from_frame(
-            frame,
-            hands_detector
-        )
-
+        base_features = extract_base_keypoints_from_frame(frame, hands_detector)
         base_frame_features.append(base_features)
 
     cap.release()
 
     base_sequence = np.array(base_frame_features, dtype=np.float32)
-
     if base_sequence.shape != (SEQUENCE_LENGTH, BASE_FEATURE_SIZE):
-        print(f"Bad base sequence shape for {video_path}: {base_sequence.shape}")
-        return None
+        return None, False
 
     final_sequence = add_motion_features(base_sequence)
-
     if final_sequence.shape != (SEQUENCE_LENGTH, FEATURE_SIZE):
-        print(f"Bad final sequence shape for {video_path}: {final_sequence.shape}")
-        return None
+        return None, False
 
-    return final_sequence
+    np.save(str(cp), final_sequence)
+    return final_sequence, False
 
 
 def main():
+    start_time = time.time()
+
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    class_folders = [
-        folder for folder in RAW_DATA_DIR.iterdir()
-        if folder.is_dir()
-    ]
-
-    labels = sorted([folder.name for folder in class_folders])
+    class_folders = [f for f in RAW_DATA_DIR.iterdir() if f.is_dir()]
+    labels = sorted([f.name for f in class_folders])
 
     if len(labels) < 2:
-        print("You need at least 2 classes.")
+        print("Need at least 2 classes.")
         return
 
-    print("Detected classes:")
-    for i, label in enumerate(labels):
-        print(f"{i}: {label}")
+    print(f"Detected classes: {labels}")
+
+    video_extensions = {".mp4", ".avi", ".mov", ".mkv"}
+
+    all_tasks = []
+    for label_index, label in enumerate(labels):
+        class_dir = RAW_DATA_DIR / label
+        video_files = sorted([
+            f for f in class_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in video_extensions
+        ])
+        for vf in video_files:
+            all_tasks.append((vf, label_index))
+
+    total = len(all_tasks)
+    already_cached = sum(1 for vf, _ in all_tasks if cache_path_for(vf).exists())
+    to_extract = total - already_cached
+
+    print(f"\nTotal videos   : {total}")
+    print(f"Already cached : {already_cached} (will load instantly)")
+    print(f"To extract     : {to_extract} (running MediaPipe on these)\n")
 
     X = []
     y = []
-
-    class_counts = {}
-
-    video_extensions = {".mp4", ".avi", ".mov", ".mkv"}
+    processed = 0
+    cache_hits = 0
+    skipped = 0
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -195,40 +169,34 @@ def main():
         min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
     ) as hands_detector:
 
-        for label_index, label in enumerate(labels):
-            class_dir = RAW_DATA_DIR / label
+        for i, (video_path, label_index) in enumerate(all_tasks, start=1):
+            sequence, from_cache = process_video(video_path, hands_detector)
 
-            video_files = [
-                file for file in class_dir.iterdir()
-                if file.is_file() and file.suffix.lower() in video_extensions
-            ]
-
-            video_files = sorted(video_files)
-
-            print(f"\nProcessing class: {label}")
-            print(f"Videos found: {len(video_files)}")
-
-            processed_count = 0
-
-            if len(video_files) == 0:
-                print(f"No videos found in {class_dir}")
-                class_counts[label] = 0
-                continue
-
-            for video_path in video_files:
-                sequence = process_video(video_path, hands_detector)
-
-                if sequence is None:
-                    print(f"Skipped: {video_path.name}")
-                    continue
-
+            if sequence is not None:
                 X.append(sequence)
                 y.append(label_index)
+                processed += 1
+                if from_cache:
+                    cache_hits += 1
+            else:
+                skipped += 1
+                print(f"  Skipped: {video_path.name}")
 
-                processed_count += 1
-                print(f"Processed: {video_path.name}")
-
-            class_counts[label] = processed_count
+            if i % 20 == 0 or i == total:
+                elapsed = time.time() - start_time
+                fresh = processed - cache_hits
+                rate = fresh / elapsed if elapsed > 0 and fresh > 0 else 0.1
+                remaining_fresh = to_extract - fresh
+                eta = remaining_fresh / rate if rate > 0 else 0
+                print(
+                    f"[{i:>4}/{total}] "
+                    f"Done: {processed} | "
+                    f"Cached: {cache_hits} | "
+                    f"Fresh: {fresh} | "
+                    f"Skipped: {skipped} | "
+                    f"Elapsed: {elapsed:.0f}s | "
+                    f"ETA: {eta:.0f}s"
+                )
 
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int32)
@@ -243,18 +211,16 @@ def main():
     with open(LABELS_PATH, "w") as f:
         json.dump(labels, f, indent=4)
 
-    print("\nExtraction completed.")
-    print(f"X shape: {X.shape}")
-    print(f"y shape: {y.shape}")
-    print(f"Labels: {labels}")
-
-    print("\nClass counts:")
-    for label, count in class_counts.items():
-        print(f"{label}: {count}")
-
-    print(f"\nSaved X to: {X_PATH}")
-    print(f"Saved y to: {Y_PATH}")
-    print(f"Saved labels to: {LABELS_PATH}")
+    total_time = time.time() - start_time
+    print(f"\nDone in {total_time:.1f}s ({total_time/60:.1f} min)")
+    print(f"X shape : {X.shape}")
+    print(f"y shape : {y.shape}")
+    print(f"Labels  : {labels}")
+    print(f"Processed: {processed} | Cached: {cache_hits} | Fresh: {processed - cache_hits} | Skipped: {skipped}")
+    print(f"\nSaved X to      : {X_PATH}")
+    print(f"Saved y to      : {Y_PATH}")
+    print(f"Saved labels to : {LABELS_PATH}")
+    print(f"Cache folder    : {CACHE_DIR}")
 
 
 if __name__ == "__main__":

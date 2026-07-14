@@ -19,8 +19,10 @@ build/
 
 # Dataset and generated training files
 ISL-App-Clean/data/raw/
-ISL-App-Clean/data/processed/*.npy
-ISL-App-Clean/data/processed/*.npz
+ISL-App-Clean/data/processed/cache/
+
+# Keep trained data arrays (needed to run on another machine)
+# X.npy and y.npy are NOT ignored
 
 # Videos
 *.mp4
